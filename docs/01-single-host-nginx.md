@@ -124,7 +124,7 @@ http {
     proxy_read_timeout 600s;
     proxy_send_timeout 600s;
 
-    resolver 1.1.1.1 1.0.0.1 8.8.8.8 9.9.9.9 valid=300s ipv6=on;
+    resolver 1.1.1.1 1.0.0.1 8.8.8.8 9.9.9.9 valid=300s ipv6=off;
     resolver_timeout 5s;
 
     limit_req_zone $binary_remote_addr zone=pkg_req_zone:50m rate=120r/s;
@@ -178,6 +178,8 @@ proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto $scheme;
 proxy_set_header X-Forwarded-Host $host;
+proxy_ssl_server_name on;
+proxy_ssl_name $proxy_host;
 proxy_buffers 64 256k;
 proxy_busy_buffers_size 512k;
 proxy_max_temp_file_size 0;
@@ -491,6 +493,14 @@ Components: main universe restricted multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 ```
 
+Disable default Ubuntu entries to avoid duplicate targets:
+
+```bash
+cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%F)
+sed -i 's/^[[:space:]]*deb /# deb /g' /etc/apt/sources.list
+apt update
+```
+
 DNF/YUM (`/etc/yum.repos.d/vaheed.repo`):
 
 ```ini
@@ -697,6 +707,30 @@ nginx -t && systemctl reload nginx
 # Use g/m/k only; do not use 't'
 grep -n 'proxy_cache_path' /etc/nginx/nginx.conf
 # expected: max_size=3072g and max_size=6144g
+```
+
+6. `apt update` returns many `configured multiple times` warnings
+
+```bash
+cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%F-%H%M%S)
+sed -i 's/^[[:space:]]*deb /# deb /g' /etc/apt/sources.list
+grep -R --line-number '^deb ' /etc/apt/sources.list /etc/apt/sources.list.d || true
+apt clean
+apt update
+```
+
+7. `502` with upstream IPv6 / TLS handshake errors
+
+```bash
+# Force IPv4 resolver behavior and enable upstream SNI for CDN-backed mirrors
+sed -i 's/ipv6=on/ipv6=off/' /etc/nginx/nginx.conf
+grep -q 'proxy_ssl_server_name on;' /etc/nginx/snippets/proxy-common.conf || \
+  printf '\nproxy_ssl_server_name on;\nproxy_ssl_name $proxy_host;\n' >> /etc/nginx/snippets/proxy-common.conf
+nginx -t && systemctl reload nginx
+
+# Validate direct origin reachability from server
+curl -4I https://archive.ubuntu.com/ubuntu/dists/jammy/InRelease
+curl -4I https://security.ubuntu.com/ubuntu/dists/jammy-security/InRelease
 ```
 
 Additional checks:
