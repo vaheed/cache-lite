@@ -655,15 +655,293 @@ bantime = 3600
 
 ## 15) Monitoring Guidance
 
-- Nginx log scrape: cache hit/miss ratio, upstream errors, latency.
-- Node exporter for disk/inode/network.
-- Container health probes for each registry service.
+Deploy full observability stack for metrics + logs + dashboards.
 
-Fast health checks:
+Monitoring components:
+
+- `prometheus`: metrics storage and alert evaluation
+- `grafana`: dashboards and activity views
+- `loki`: log backend
+- `promtail`: log shipping from Nginx/system logs
+- `node-exporter`: host metrics (CPU, RAM, disk, inode, network)
+- `cadvisor`: container metrics
+- `nginx-prometheus-exporter`: Nginx traffic/connection metrics
+
+Create monitoring directories:
 
 ```bash
-curl -I https://ubuntu.repo.vaheed.net/ubuntu/dists/noble/Release
-curl -s https://docker.repo.vaheed.net/v2/
+mkdir -p /opt/repo-cdn/monitoring/{prometheus,loki,promtail,grafana/provisioning/datasources,grafana/provisioning/dashboards,grafana/dashboards}
+```
+
+Add Nginx stub status endpoint (`/etc/nginx/conf.d/status.conf`):
+
+```nginx
+server {
+    listen 127.0.0.1:8080;
+    server_name 127.0.0.1;
+
+    location /nginx_status {
+        stub_status;
+        allow 127.0.0.1;
+        deny all;
+    }
+}
+```
+
+Monitoring compose (`/opt/repo-cdn/monitoring/docker-compose.monitoring.yml`):
+
+```yaml
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: repo-prometheus
+    restart: unless-stopped
+    ports: ["127.0.0.1:9090:9090"]
+    volumes:
+      - /opt/repo-cdn/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /opt/repo-cdn/monitoring/prometheus/data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: repo-grafana
+    restart: unless-stopped
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=ChangeThisStrongPassword
+      - GF_SERVER_ROOT_URL=https://status.repo.vaheed.net/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+    volumes:
+      - /opt/repo-cdn/monitoring/grafana/data:/var/lib/grafana
+      - /opt/repo-cdn/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - /opt/repo-cdn/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: repo-loki
+    restart: unless-stopped
+    ports: ["127.0.0.1:3100:3100"]
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - /opt/repo-cdn/monitoring/loki/config.yml:/etc/loki/local-config.yaml:ro
+      - /opt/repo-cdn/monitoring/loki/data:/loki
+
+  promtail:
+    image: grafana/promtail:3.1.1
+    container_name: repo-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - /opt/repo-cdn/monitoring/promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/log:/var/log:ro
+      - /opt/repo-cdn/monitoring/promtail/positions:/positions
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: repo-node-exporter
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    command:
+      - --path.rootfs=/host
+    volumes:
+      - /:/host:ro,rslave
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: repo-cadvisor
+    restart: unless-stopped
+    ports: ["127.0.0.1:8088:8080"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.3.0
+    container_name: repo-nginx-exporter
+    restart: unless-stopped
+    command:
+      - -nginx.scrape-uri=http://127.0.0.1:8080/nginx_status
+    network_mode: host
+```
+
+Prometheus config (`/opt/repo-cdn/monitoring/prometheus/prometheus.yml`):
+
+```yaml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['127.0.0.1:9090']
+
+  - job_name: nginx
+    static_configs:
+      - targets: ['127.0.0.1:9113']
+
+  - job_name: node
+    static_configs:
+      - targets: ['127.0.0.1:9100']
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['127.0.0.1:8088']
+```
+
+Loki config (`/opt/repo-cdn/monitoring/loki/config.yml`):
+
+```yaml
+auth_enabled: false
+server:
+  http_listen_port: 3100
+common:
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+schema_config:
+  configs:
+    - from: 2025-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+storage_config:
+  filesystem:
+    directory: /loki/chunks
+```
+
+Promtail config (`/opt/repo-cdn/monitoring/promtail/config.yml`):
+
+```yaml
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+positions:
+  filename: /positions/positions.yaml
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+scrape_configs:
+  - job_name: nginx-access
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: nginx-access
+          host: repo-edge
+          __path__: /var/log/nginx/access.log
+  - job_name: nginx-error
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: nginx-error
+          host: repo-edge
+          __path__: /var/log/nginx/error.log
+  - job_name: syslog
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: syslog
+          host: repo-edge
+          __path__: /var/log/syslog
+```
+
+Grafana datasources (`/opt/repo-cdn/monitoring/grafana/provisioning/datasources/datasources.yml`):
+
+```yaml
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+```
+
+Start monitoring stack:
+
+```bash
+docker compose -f /opt/repo-cdn/monitoring/docker-compose.monitoring.yml up -d
+```
+
+Expose Grafana through Nginx (`/etc/nginx/conf.d/status.conf` add-on):
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name status.repo.vaheed.net;
+    include /etc/nginx/snippets/tls.conf;
+    include /etc/nginx/snippets/security-headers.conf;
+
+    auth_basic "Restricted";
+    auth_basic_user_file /etc/nginx/.htpasswd-status;
+
+    location /grafana/ {
+        proxy_pass http://127.0.0.1:3000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /prometheus/ {
+        proxy_pass http://127.0.0.1:9090/;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+Create dashboard access user:
+
+```bash
+apt-get install -y apache2-utils
+htpasswd -c /etc/nginx/.htpasswd-status admin
+nginx -t && systemctl reload nginx
+```
+
+Dashboard panels to create in Grafana (full activity view):
+
+1. Total requests/sec (Nginx):
+`sum(rate(nginx_http_requests_total[1m]))`
+2. 4xx rate:
+`sum(rate(nginx_http_requests_total{status=~"4.."}[5m]))`
+3. 5xx rate:
+`sum(rate(nginx_http_requests_total{status=~"5.."}[5m]))`
+4. Active connections:
+`nginx_connections_active`
+5. Package cache HIT ratio (from logs via Loki):
+`sum(rate({job="nginx-access"} |= "cache=HIT" [5m])) / (sum(rate({job="nginx-access"} |= "cache=HIT" [5m])) + sum(rate({job="nginx-access"} |= "cache=MISS" [5m])))`
+6. Top client IPs:
+Loki query: `{job="nginx-access"} | pattern "<ip> - - [<time>] \"<method> <path> <proto>\" <status> <bytes> <_> <_> rt=<rt> <_>" | topk(20, count_over_time({job="nginx-access"}[5m]))`
+7. Top requested hosts:
+`sum by (host) (count_over_time({job="nginx-access"}[5m]))`
+8. Upstream error log stream:
+`{job="nginx-error"} |= "upstream"`
+9. Disk usage (`/var/cache/repo-cdn`):
+`100 - ((node_filesystem_avail_bytes{mountpoint="/var"} * 100) / node_filesystem_size_bytes{mountpoint="/var"})`
+10. Docker registry container health:
+`sum by (name) (rate(container_cpu_usage_seconds_total{name=~"registry-.*"}[5m]))`
+
+Operational live activity commands:
+
+```bash
+# live request stream
+tail -f /var/log/nginx/access.log
+
+# cache HIT/MISS counters
+awk '{for(i=1;i<=NF;i++) if($i ~ /^cache=/) print $i}' /var/log/nginx/access.log | sort | uniq -c
+
+# current top endpoints
+awk '{print $7}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head -20
 ```
 
 ## 16) Troubleshooting
