@@ -72,7 +72,7 @@ OCI mirrors:
 - Full filesystem layout
 - Full Nginx and ATS config examples
 - Full `registry:2` pull-through cache configs
-- TLS (RSA/EC manual deployment), OCSP, HSTS
+- TLS (RSA manual deployment), OCSP, HSTS
 - Kernel/sysctl and ulimit tuning
 - Firewall and abuse controls
 - Client-side mirror configuration examples for major Linux families

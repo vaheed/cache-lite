@@ -37,10 +37,8 @@ Host `/etc/hosts` example for validation:
 │   ├── mcr/config.yml
 │   └── oci/config.yml
 ├── tls/
-│   ├── fullchain.ecdsa.pem
-│   ├── privkey.ecdsa.pem
-│   ├── fullchain.rsa.pem
-│   ├── privkey.rsa.pem
+│   ├── fullchain.pem
+│   ├── privkey.pem
 │   └── ca-chain.pem
 ├── scripts/
 │   ├── deploy.sh
@@ -117,8 +115,8 @@ http {
     open_file_cache_min_uses 2;
     open_file_cache_errors on;
 
-    proxy_cache_path /var/cache/repo-cdn/pkg levels=1:2 keys_zone=pkg_cache:1024m max_size=3t inactive=45d use_temp_path=off;
-    proxy_cache_path /var/cache/repo-cdn/oci levels=1:2 keys_zone=oci_cache:1024m max_size=6t inactive=90d use_temp_path=off;
+    proxy_cache_path /var/cache/repo-cdn/pkg levels=1:2 keys_zone=pkg_cache:1024m max_size=3072g inactive=45d use_temp_path=off;
+    proxy_cache_path /var/cache/repo-cdn/oci levels=1:2 keys_zone=oci_cache:1024m max_size=6144g inactive=90d use_temp_path=off;
 
     proxy_temp_path /var/cache/repo-cdn/tmp 1 2;
 
@@ -160,10 +158,8 @@ ssl_session_cache shared:SSL:100m;
 ssl_session_timeout 1d;
 ssl_session_tickets off;
 
-ssl_certificate     /opt/repo-cdn/tls/fullchain.ecdsa.pem;
-ssl_certificate_key /opt/repo-cdn/tls/privkey.ecdsa.pem;
-ssl_certificate     /opt/repo-cdn/tls/fullchain.rsa.pem;
-ssl_certificate_key /opt/repo-cdn/tls/privkey.rsa.pem;
+ssl_certificate     /opt/repo-cdn/tls/fullchain.pem;
+ssl_certificate_key /opt/repo-cdn/tls/privkey.pem;
 
 ssl_stapling on;
 ssl_stapling_verify on;
@@ -213,7 +209,7 @@ add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
 ```nginx
 server {
     listen 80;
-    server_name ~^(?<repo>[a-z0-9-]+)\.repo\.vaheed\.ir$;
+    server_name ~^(?<repo>[a-z0-9-]+)\.repo\.vaheed\.net$;
     return 301 https://$host$request_uri;
 }
 
@@ -403,8 +399,8 @@ Per service `remoteurl`:
 2. Verify:
 
 ```bash
-openssl x509 -in /opt/repo-cdn/tls/fullchain.ecdsa.pem -noout -text | head
-openssl rsa -in /opt/repo-cdn/tls/privkey.rsa.pem -check -noout
+openssl x509 -in /opt/repo-cdn/tls/fullchain.pem -noout -text | head
+openssl rsa -in /opt/repo-cdn/tls/privkey.pem -check -noout
 ```
 
 3. Test Nginx and reload:

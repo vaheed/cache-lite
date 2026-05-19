@@ -59,12 +59,11 @@ staging-docker          300 IN CNAME   staging
 
 Supported key types:
 
-- RSA 2048/3072 (`fullchain.rsa.pem`, `privkey.rsa.pem`)
-- ECDSA P-256/P-384 (`fullchain.ecdsa.pem`, `privkey.ecdsa.pem`)
+- RSA 2048/3072 (`fullchain.pem`, `privkey.pem`)
 
 Recommended:
 
-- Serve ECDSA first, RSA as fallback.
+- Use RSA certificate and key only.
 - SAN wildcard cert: `*.repo.vaheed.net` + `repo.vaheed.net`.
 - Use OCSP stapling resolver and refresh via scheduled deployment script.
 

@@ -33,10 +33,8 @@ Use same public subdomains as single-host design. Point all records to Swarm ing
 │   ├── mcr/config.yml
 │   └── oci/config.yml
 ├── tls/
-│   ├── fullchain.ecdsa.pem
-│   ├── privkey.ecdsa.pem
-│   ├── fullchain.rsa.pem
-│   └── privkey.rsa.pem
+│   ├── fullchain.pem
+│   └── privkey.pem
 └── scripts/
     ├── deploy-stack.sh
     ├── gc-all.sh
@@ -242,8 +240,7 @@ Use manual cert deployment in `/opt/repo-cdn-swarm/tls/`.
 Create `/opt/repo-cdn-swarm/ats/ssl_multicert.config`:
 
 ```text
-dest_ip=* ssl_cert_name=fullchain.ecdsa.pem ssl_key_name=privkey.ecdsa.pem
-dest_ip=* ssl_cert_name=fullchain.rsa.pem ssl_key_name=privkey.rsa.pem
+dest_ip=* ssl_cert_name=fullchain.pem ssl_key_name=privkey.pem
 ```
 
 ## 10) System Tuning
