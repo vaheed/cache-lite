@@ -167,7 +167,54 @@ Podman test:
 podman pull docker.io/library/alpine:latest
 ```
 
-## 10) Validation Commands
+## 10) Kubernetes (k3s / RKE2) Registry Mirrors
+
+For Kubernetes nodes that use containerd via k3s or RKE2, configure mirrors in `registries.yaml`.
+
+k3s path:
+
+- `/etc/rancher/k3s/registries.yaml`
+
+RKE2 path:
+
+- `/etc/rancher/rke2/registries.yaml`
+
+Example:
+
+```yaml
+mirrors:
+  docker.io:
+    endpoint:
+      - "https://docker.repo.vaheed.net"
+  gcr.io:
+    endpoint:
+      - "https://gcr.repo.vaheed.net"
+  ghcr.io:
+    endpoint:
+      - "https://ghcr.repo.vaheed.net"
+  quay.io:
+    endpoint:
+      - "https://quay.repo.vaheed.net"
+  registry.k8s.io:
+    endpoint:
+      - "https://k8s.repo.vaheed.net"
+  mcr.microsoft.com:
+    endpoint:
+      - "https://mcr.repo.vaheed.net"
+```
+
+Restart service after update:
+
+```bash
+# k3s
+systemctl restart k3s
+
+# RKE2
+systemctl restart rke2-server
+systemctl restart rke2-agent
+```
+
+## 11) Validation Commands
 
 APT metadata:
 
@@ -183,7 +230,7 @@ curl -I https://docker.repo.vaheed.net/v2/
 
 Expected for `/v2/`: `200` or `401` with `WWW-Authenticate`.
 
-## 11) Common Issues
+## 12) Common Issues
 
 1. `apt update` shows duplicate target warnings:
 Disable duplicate lines in `/etc/apt/sources.list` as shown in section 2.
@@ -200,7 +247,7 @@ apt update
 3. Docker pulls bypass mirror:
 Confirm `daemon.json` is valid JSON and Docker was restarted.
 
-## 12) Support Data to Provide
+## 13) Support Data to Provide
 
 If a client has issues, provide:
 
