@@ -657,23 +657,6 @@ bantime = 3600
 
 Deploy full observability stack for metrics + logs + dashboards.
 
-Use the ready-to-use files in this repository for automatic setup:
-
-- `monitoring/docker-compose.monitoring.yml`
-- `monitoring/prometheus/prometheus.yml`
-- `monitoring/loki/config.yml`
-- `monitoring/promtail/config.yml`
-- `monitoring/grafana/provisioning/datasources/datasources.yml`
-- `monitoring/grafana/provisioning/dashboards/dashboards.yml`
-- `monitoring/grafana/dashboards/cache-lite-overview.json`
-
-Copy them to the host:
-
-```bash
-mkdir -p /opt/repo-cdn/monitoring
-cp -a ./monitoring/* /opt/repo-cdn/monitoring/
-```
-
 Monitoring components:
 
 - `prometheus`: metrics storage and alert evaluation
@@ -794,20 +777,24 @@ global:
 scrape_configs:
   - job_name: prometheus
     static_configs:
-      - targets: ['127.0.0.1:9090']
+      - targets: ['prometheus:9090']
 
   - job_name: nginx
     static_configs:
-      - targets: ['127.0.0.1:9113']
+      - targets: ['192.168.20.130:9113']
 
   - job_name: node
     static_configs:
-      - targets: ['127.0.0.1:9100']
+      - targets: ['192.168.20.130:9100']
 
   - job_name: cadvisor
     static_configs:
-      - targets: ['127.0.0.1:8088']
+      - targets: ['cadvisor:8080']
 ```
+
+Important:
+- `nginx-exporter` and `node-exporter` run with `network_mode: host`, so Prometheus must scrape them via host IP (example above uses `192.168.20.130`).
+- Replace `192.168.20.130` with your cache server IP if different.
 
 Loki config (`/opt/repo-cdn/monitoring/loki/config.yml`):
 
@@ -918,6 +905,10 @@ server {
 
     auth_basic "Restricted";
     auth_basic_user_file /etc/nginx/.htpasswd-status;
+
+    location = / {
+        return 302 /grafana/;
+    }
 
     location /grafana/ {
         proxy_pass http://127.0.0.1:3000;
