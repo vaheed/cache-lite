@@ -657,6 +657,23 @@ bantime = 3600
 
 Deploy full observability stack for metrics + logs + dashboards.
 
+Use the ready-to-use files in this repository for automatic setup:
+
+- `monitoring/docker-compose.monitoring.yml`
+- `monitoring/prometheus/prometheus.yml`
+- `monitoring/loki/config.yml`
+- `monitoring/promtail/config.yml`
+- `monitoring/grafana/provisioning/datasources/datasources.yml`
+- `monitoring/grafana/provisioning/dashboards/dashboards.yml`
+- `monitoring/grafana/dashboards/cache-lite-overview.json`
+
+Copy them to the host:
+
+```bash
+mkdir -p /opt/repo-cdn/monitoring
+cp -a ./monitoring/* /opt/repo-cdn/monitoring/
+```
+
 Monitoring components:
 
 - `prometheus`: metrics storage and alert evaluation
@@ -903,15 +920,26 @@ server {
     auth_basic_user_file /etc/nginx/.htpasswd-status;
 
     location /grafana/ {
-        proxy_pass http://127.0.0.1:3000/;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Prefix /grafana;
     }
 
     location /prometheus/ {
-        proxy_pass http://127.0.0.1:9090/;
+        proxy_pass http://127.0.0.1:9090;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Prefix /prometheus;
+        proxy_redirect ~^/(.*)$ /prometheus/$1;
     }
 }
 ```
@@ -946,6 +974,19 @@ Loki query: `{job="nginx-access"} | pattern "<ip> - - [<time>] \"<method> <path>
 `100 - ((node_filesystem_avail_bytes{mountpoint="/var"} * 100) / node_filesystem_size_bytes{mountpoint="/var"})`
 10. Docker registry container health:
 `sum by (name) (rate(container_cpu_usage_seconds_total{name=~"registry-.*"}[5m]))`
+
+Automatic dashboard provisioning:
+
+- The dashboard `cache-lite Overview` is auto-loaded from:
+  - `/opt/repo-cdn/monitoring/grafana/dashboards/cache-lite-overview.json`
+- Provisioning file:
+  - `/opt/repo-cdn/monitoring/grafana/provisioning/dashboards/dashboards.yml`
+
+After changing dashboard JSON:
+
+```bash
+docker restart repo-grafana
+```
 
 Operational live activity commands:
 
