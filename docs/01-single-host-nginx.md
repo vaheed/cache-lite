@@ -178,8 +178,6 @@ proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto $scheme;
 proxy_set_header X-Forwarded-Host $host;
-proxy_buffering on;
-proxy_request_buffering on;
 proxy_buffers 64 256k;
 proxy_busy_buffers_size 512k;
 proxy_max_temp_file_size 0;
@@ -657,10 +655,57 @@ curl -s https://docker.repo.vaheed.net/v2/
 
 ## 16) Troubleshooting
 
-- `502` on OCI path: check container port binding and local firewall.
-- poor hit ratio: verify client URLs are consistent and avoid query-string variance.
-- TLS chain error: rebuild `ca-chain.pem` and reload.
-- disk full: reduce `inactive` TTL and run GC.
+Runbook commands for common startup failures:
+
+1. Duplicate proxy directives (`proxy_buffering` / `proxy_request_buffering`)
+
+```bash
+# Keep proxy_buffering/proxy_request_buffering only in OCI location block.
+# Remove duplicates from shared snippet:
+sed -i '/proxy_buffering /d;/proxy_request_buffering /d' /etc/nginx/snippets/proxy-common.conf
+nginx -t && systemctl reload nginx
+```
+
+2. Missing trusted chain file
+
+```bash
+# If ca-chain.pem does not exist, use fullchain.pem as trusted certificate source
+sed -i 's#ssl_trusted_certificate /opt/repo-cdn/tls/ca-chain.pem;#ssl_trusted_certificate /opt/repo-cdn/tls/fullchain.pem;#' /etc/nginx/snippets/tls.conf
+nginx -t && systemctl reload nginx
+```
+
+3. OCSP stapling warning (`no OCSP responder URL`)
+
+```bash
+# Non-fatal warning. Disable stapling if cert has no OCSP URI.
+sed -i 's/ssl_stapling on;/ssl_stapling off;/; s/ssl_stapling_verify on;/ssl_stapling_verify off;/' /etc/nginx/snippets/tls.conf
+nginx -t && systemctl reload nginx
+```
+
+4. Missing cache directories
+
+```bash
+mkdir -p /var/cache/repo-cdn/{pkg,oci,tmp}
+chown -R www-data:www-data /var/cache/repo-cdn
+chmod 755 /var/cache/repo-cdn /var/cache/repo-cdn/pkg /var/cache/repo-cdn/oci /var/cache/repo-cdn/tmp
+nginx -t && systemctl reload nginx
+```
+
+5. Invalid cache size unit
+
+```bash
+# Use g/m/k only; do not use 't'
+grep -n 'proxy_cache_path' /etc/nginx/nginx.conf
+# expected: max_size=3072g and max_size=6144g
+```
+
+Additional checks:
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+ss -ltnp | grep -E ':(80|443|5001|5002|5003|5004|5005|5006|5007)\\b'
+tail -n 100 /var/log/nginx/error.log
+```
 
 ## 17) Scaling Considerations
 
