@@ -189,9 +189,7 @@ proxy_cache_lock_timeout 20s;
 proxy_cache_revalidate on;
 proxy_cache_background_update on;
 proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
-slice 1m;
-proxy_set_header Range $slice_range;
-proxy_cache_key "$scheme$proxy_host$request_uri$slice_range";
+proxy_cache_key "$scheme$proxy_host$request_uri";
 add_header X-Cache-Status $upstream_cache_status always;
 ```
 
@@ -246,8 +244,10 @@ server {
     location / {
         include /etc/nginx/snippets/proxy-common.conf;
         proxy_cache pkg_cache;
-        proxy_cache_valid 200 301 302 45d;
+        proxy_cache_valid 200 206 301 302 45d;
         proxy_cache_valid 404 5m;
+        proxy_ignore_headers Set-Cookie Cache-Control Expires;
+        proxy_hide_header Set-Cookie;
         proxy_pass https://$pkg_upstream$request_uri;
     }
 }
@@ -279,6 +279,9 @@ server {
         include /etc/nginx/snippets/proxy-common.conf;
         proxy_request_buffering off;
         proxy_buffering off;
+        slice 1m;
+        proxy_set_header Range $slice_range;
+        proxy_cache_key "$scheme$proxy_host$request_uri$slice_range";
 
         if ($host = docker.repo.vaheed.net) { proxy_pass http://reg_dockerhub; }
         if ($host = ghcr.repo.vaheed.net)   { proxy_pass http://reg_ghcr; }
@@ -731,6 +734,32 @@ nginx -t && systemctl reload nginx
 # Validate direct origin reachability from server
 curl -4I https://archive.ubuntu.com/ubuntu/dists/jammy/InRelease
 curl -4I https://security.ubuntu.com/ubuntu/dists/jammy-security/InRelease
+```
+
+8. Package files not cached for any distro (`X-Cache-Status` stays `MISS`)
+
+```bash
+# Ensure package mirrors do NOT use slice range cache key
+sed -i '/slice 1m;/d;/\\$slice_range/d' /etc/nginx/snippets/proxy-common.conf
+
+# Ensure package location caches metadata/content even when upstream sets cookie/cache-control headers
+grep -n 'proxy_ignore_headers Set-Cookie Cache-Control Expires;' /etc/nginx/conf.d/package-mirrors.conf
+grep -n 'proxy_hide_header Set-Cookie;' /etc/nginx/conf.d/package-mirrors.conf
+grep -n 'proxy_cache_valid 200 206 301 302' /etc/nginx/conf.d/package-mirrors.conf
+
+nginx -t && systemctl reload nginx
+
+# Test across distro endpoints (2nd request should be HIT)
+for u in \
+  https://ubuntu.repo.vaheed.net/ubuntu/dists/jammy/InRelease \
+  https://debian.repo.vaheed.net/debian/dists/bookworm/InRelease \
+  https://alpine.repo.vaheed.net/alpine/v3.21/main/x86_64/APKINDEX.tar.gz \
+  https://arch.repo.vaheed.net/core/os/x86_64/core.db \
+  https://fedora.repo.vaheed.net/pub/fedora/linux/releases/40/Everything/x86_64/os/repodata/repomd.xml \
+  https://opensuse.repo.vaheed.net/distribution/leap/15.6/repo/oss/repodata/repomd.xml; do
+  curl -sI "$u" | egrep -i 'HTTP/|x-cache-status|content-length' || true
+  curl -sI "$u" | egrep -i 'HTTP/|x-cache-status|content-length' || true
+done
 ```
 
 Additional checks:
