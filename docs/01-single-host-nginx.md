@@ -871,6 +871,22 @@ datasources:
 Start monitoring stack:
 
 ```bash
+mkdir -p /opt/repo-cdn/monitoring/prometheus/data
+mkdir -p /opt/repo-cdn/monitoring/loki/data
+mkdir -p /opt/repo-cdn/monitoring/grafana/data
+mkdir -p /opt/repo-cdn/monitoring/promtail/positions
+
+# required ownership for container runtime users
+chown -R 65534:65534 /opt/repo-cdn/monitoring/prometheus/data
+chown -R 10001:10001 /opt/repo-cdn/monitoring/loki/data
+chown -R 472:472 /opt/repo-cdn/monitoring/grafana/data
+chown -R 0:0 /opt/repo-cdn/monitoring/promtail/positions
+
+chmod -R 750 /opt/repo-cdn/monitoring/prometheus/data
+chmod -R 750 /opt/repo-cdn/monitoring/loki/data
+chmod -R 750 /opt/repo-cdn/monitoring/grafana/data
+chmod -R 755 /opt/repo-cdn/monitoring/promtail/positions
+
 docker compose -f /opt/repo-cdn/monitoring/docker-compose.monitoring.yml up -d
 ```
 
@@ -942,6 +958,21 @@ awk '{for(i=1;i<=NF;i++) if($i ~ /^cache=/) print $i}' /var/log/nginx/access.log
 
 # current top endpoints
 awk '{print $7}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head -20
+```
+
+If monitoring containers fail with `permission denied`:
+
+```bash
+docker compose -f /opt/repo-cdn/monitoring/docker-compose.monitoring.yml down
+
+chown -R 65534:65534 /opt/repo-cdn/monitoring/prometheus/data
+chown -R 10001:10001 /opt/repo-cdn/monitoring/loki/data
+chown -R 472:472 /opt/repo-cdn/monitoring/grafana/data
+chown -R 0:0 /opt/repo-cdn/monitoring/promtail/positions
+
+docker compose -f /opt/repo-cdn/monitoring/docker-compose.monitoring.yml up -d
+docker logs --tail=80 repo-loki
+docker logs --tail=80 repo-prometheus
 ```
 
 ## 16) Troubleshooting
