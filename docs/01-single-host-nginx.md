@@ -102,8 +102,8 @@ http {
     server_tokens off;
     types_hash_max_size 4096;
 
-    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
-                    '$status $body_bytes_sent "$http_referer" '
+    log_format main '$remote_addr - $remote_user [$time_local] host="$host" "$request" '
+                    '$status $body_bytes_sent req_bytes=$request_length "$http_referer" '
                     '"$http_user_agent" rt=$request_time uct=$upstream_connect_time '
                     'uht=$upstream_header_time urt=$upstream_response_time cache=$upstream_cache_status';
 
@@ -141,6 +141,15 @@ http {
     map $http_user_agent $bad_ua {
         default 0;
         ~*(sqlmap|nikto|masscan|zgrab|nmap|acunetix) 1;
+    }
+
+    map $uri $pkg_metadata {
+        default 0;
+        ~*/(InRelease|Release|Release\.gpg)$ 1;
+        ~*/(Packages|Sources|Contents-[^/]+|Components-[^/]+\.yml)(\.gz|\.xz|\.bz2|\.zst)?$ 1;
+        ~*/repodata/(repomd\.xml|.*\.(xml|sqlite)(\.gz|\.bz2|\.xz|\.zck)?)$ 1;
+        ~*/APKINDEX\.tar\.gz$ 1;
+        ~*/[^/]+\.db(\.sig)?$ 1;
     }
 
     include /etc/nginx/conf.d/*.conf;
@@ -244,6 +253,8 @@ server {
     location / {
         include /etc/nginx/snippets/proxy-common.conf;
         proxy_cache pkg_cache;
+        proxy_cache_bypass $pkg_metadata;
+        proxy_no_cache $pkg_metadata;
         proxy_cache_valid 200 206 301 302 45d;
         proxy_cache_valid 404 5m;
         proxy_ignore_headers Set-Cookie Cache-Control Expires;
@@ -486,7 +497,7 @@ table inet filter {
 
 ## 13) Client Configuration Examples
 
-APT (`/etc/apt/sources.list.d/vaheed.sources`):
+Ubuntu 24.04 LTS APT (`/etc/apt/sources.list.d/vaheed.sources`):
 
 ```deb822
 Types: deb
@@ -499,12 +510,37 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 Disable default Ubuntu entries to avoid duplicate targets:
 
 ```bash
-cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%F)
-sed -i 's/^[[:space:]]*deb /# deb /g' /etc/apt/sources.list
+[ -f /etc/apt/sources.list ] && cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%F)
+[ -f /etc/apt/sources.list ] && sed -i 's/^[[:space:]]*deb /# deb /g' /etc/apt/sources.list
+[ -f /etc/apt/sources.list.d/ubuntu.sources ] && mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.disabled
 apt update
 ```
 
-DNF/YUM (`/etc/yum.repos.d/vaheed.repo`):
+Ubuntu 22.04 LTS uses `jammy jammy-updates jammy-security` instead of `noble`.
+
+Debian APT (`/etc/apt/sources.list.d/vaheed.sources`):
+
+```deb822
+Types: deb
+URIs: https://debian.repo.vaheed.net/debian
+Suites: bookworm bookworm-updates
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: https://debian.repo.vaheed.net/debian-security
+Suites: bookworm-security
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+```
+
+Install the archive keyring first if the host is minimal:
+
+```bash
+apt-get install -y debian-archive-keyring
+```
+
+Rocky Linux DNF (`/etc/yum.repos.d/vaheed-rocky.repo`):
 
 ```ini
 [vaheed-baseos]
@@ -514,6 +550,21 @@ enabled=1
 gpgcheck=1
 gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-rockyofficial
 ```
+
+CentOS Stream DNF (`/etc/yum.repos.d/vaheed-centos-stream.repo`):
+
+```ini
+[vaheed-baseos]
+name=VAHEED CentOS Stream BaseOS
+baseurl=https://centos.repo.vaheed.net/10-stream/BaseOS/$basearch/os/
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial
+```
+
+Use `9-stream` or `10-stream` to match the installed CentOS Stream release.
+
+CentOS Linux 7 is EOL and is not available from the CentOS Stream mirror path. Use `vault.centos.org` or migrate to Rocky/Alma 8+; do not point CentOS 7 clients at `rocky.repo.vaheed.net/pub/rocky/7/BaseOS/...`.
 
 APK (`/etc/apk/repositories`):
 
@@ -744,8 +795,10 @@ services:
     pid: host
     command:
       - --path.rootfs=/host
+      - --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
     volumes:
       - /:/host:ro,rslave
+      - /var/lib/node_exporter/textfile_collector:/var/lib/node_exporter/textfile_collector:ro
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
@@ -795,6 +848,81 @@ scrape_configs:
 Important:
 - `nginx-exporter` and `node-exporter` run with `network_mode: host`, so Prometheus must scrape them via host IP (example above uses `192.168.20.130`).
 - Replace `192.168.20.130` with your cache server IP if different.
+
+Repo CDN textfile metrics (`/opt/repo-cdn/scripts/repo-cdn-metrics.sh`):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUT_DIR=/var/lib/node_exporter/textfile_collector
+TMP="$OUT_DIR/repo_cdn.prom.$$"
+OUT="$OUT_DIR/repo_cdn.prom"
+HOSTNAME_VALUE="$(hostname -f 2>/dev/null || hostname)"
+IPV4_VALUE="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+
+mkdir -p "$OUT_DIR"
+{
+  printf '# HELP repo_cdn_host_info Cache host identity and primary IPv4 address.\n'
+  printf '# TYPE repo_cdn_host_info gauge\n'
+  printf 'repo_cdn_host_info{hostname="%s",ipv4="%s"} 1\n' "$HOSTNAME_VALUE" "$IPV4_VALUE"
+
+  printf '# HELP repo_cdn_storage_bytes Disk usage by cache area.\n'
+  printf '# TYPE repo_cdn_storage_bytes gauge\n'
+  for path in /var/cache/repo-cdn/pkg /var/cache/repo-cdn/oci /var/cache/repo-cdn/tmp; do
+    [ -d "$path" ] || continue
+    area="${path##*/}"
+    bytes="$(du -sb "$path" | awk '{print $1}')"
+    printf 'repo_cdn_storage_bytes{area="%s",path="%s"} %s\n' "$area" "$path" "$bytes"
+  done
+
+  printf '# HELP repo_cdn_registry_storage_bytes Disk usage by registry mirror.\n'
+  printf '# TYPE repo_cdn_registry_storage_bytes gauge\n'
+  for path in /var/lib/repo-cdn/registry/*; do
+    [ -d "$path" ] || continue
+    registry="${path##*/}"
+    bytes="$(du -sb "$path" | awk '{print $1}')"
+    printf 'repo_cdn_registry_storage_bytes{registry="%s",path="%s"} %s\n' "$registry" "$path" "$bytes"
+  done
+
+  printf '# HELP repo_cdn_listen_info Public listener identity.\n'
+  printf '# TYPE repo_cdn_listen_info gauge\n'
+  ss -H -ltn '( sport = :80 or sport = :443 )' | awk '{print $4}' | sort -u | while read -r listen; do
+    printf 'repo_cdn_listen_info{listen="%s"} 1\n' "$listen"
+  done
+} > "$TMP"
+mv "$TMP" "$OUT"
+```
+
+Install it with a timer:
+
+```bash
+install -m 0755 /opt/repo-cdn/scripts/repo-cdn-metrics.sh /usr/local/sbin/repo-cdn-metrics
+cat >/etc/systemd/system/repo-cdn-metrics.service <<'EOF'
+[Unit]
+Description=Repo CDN textfile metrics
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/repo-cdn-metrics
+EOF
+
+cat >/etc/systemd/system/repo-cdn-metrics.timer <<'EOF'
+[Unit]
+Description=Collect Repo CDN textfile metrics every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=repo-cdn-metrics.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now repo-cdn-metrics.timer
+```
 
 Loki config (`/opt/repo-cdn/monitoring/loki/config.yml`):
 
@@ -956,15 +1084,25 @@ Dashboard panels to create in Grafana (full activity view):
 5. Package cache HIT ratio (from logs via Loki):
 `sum(rate({job="nginx-access"} |= "cache=HIT" [5m])) / (sum(rate({job="nginx-access"} |= "cache=HIT" [5m])) + sum(rate({job="nginx-access"} |= "cache=MISS" [5m])))`
 6. Top client IPs:
-Loki query: `{job="nginx-access"} | pattern "<ip> - - [<time>] \"<method> <path> <proto>\" <status> <bytes> <_> <_> rt=<rt> <_>" | topk(20, count_over_time({job="nginx-access"}[5m]))`
+Loki query: `topk(20, sum by (ip) (count_over_time({job="nginx-access"} | pattern "<ip> - <user> [<time>] host=\"<host>\" \"<method> <path> <proto>\" <status> <bytes> req_bytes=<req_bytes> <_>" [5m])))`
 7. Top requested hosts:
-`sum by (host) (count_over_time({job="nginx-access"}[5m]))`
+`topk(20, sum by (host) (count_over_time({job="nginx-access"} | pattern "<ip> - <user> [<time>] host=\"<host>\" \"<method> <path> <proto>\" <status> <bytes> req_bytes=<req_bytes> <_>" [5m])))`
 8. Upstream error log stream:
 `{job="nginx-error"} |= "upstream"`
 9. Disk usage (`/var/cache/repo-cdn`):
 `100 - ((node_filesystem_avail_bytes{mountpoint="/var"} * 100) / node_filesystem_size_bytes{mountpoint="/var"})`
 10. Docker registry container health:
 `sum by (name) (rate(container_cpu_usage_seconds_total{name=~"registry-.*"}[5m]))`
+11. Repo cache storage by area:
+`repo_cdn_storage_bytes`
+12. OCI registry storage by upstream:
+`repo_cdn_registry_storage_bytes`
+13. Primary cache server IP:
+`repo_cdn_host_info`
+14. Network throughput by interface:
+`sum by (device) (rate(node_network_receive_bytes_total{device!~"lo|docker.*|br-.*|veth.*"}[5m]))` and `sum by (device) (rate(node_network_transmit_bytes_total{device!~"lo|docker.*|br-.*|veth.*"}[5m]))`
+15. Traffic served by repo host:
+`topk(20, sum by (host) (rate({job="nginx-access"} | pattern "<ip> - <user> [<time>] host=\"<host>\" \"<method> <path> <proto>\" <status> <bytes> req_bytes=<req_bytes> <_>" | unwrap bytes [5m])))`
 
 Automatic dashboard provisioning:
 
@@ -990,6 +1128,18 @@ awk '{for(i=1;i<=NF;i++) if($i ~ /^cache=/) print $i}' /var/log/nginx/access.log
 
 # current top endpoints
 awk '{print $7}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head -20
+
+# current top client IPs
+awk '{print $1}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head -20
+
+# current top repo hosts
+awk '{for(i=1;i<=NF;i++) if($i ~ /^host=/) print $i}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head -20
+
+# storage by cache and registry area
+du -sh /var/cache/repo-cdn/* /var/lib/repo-cdn/registry/* 2>/dev/null
+
+# primary outbound IP used by the cache host
+ip -4 route get 1.1.1.1
 ```
 
 If monitoring containers fail with `permission denied`:
@@ -1077,7 +1227,39 @@ curl -4I https://archive.ubuntu.com/ubuntu/dists/jammy/InRelease
 curl -4I https://security.ubuntu.com/ubuntu/dists/jammy-security/InRelease
 ```
 
-8. Package files not cached for any distro (`X-Cache-Status` stays `MISS`)
+8. APT/YUM hash or size mismatch for metadata
+
+APT errors such as `File has unexpected size`, `Hash Sum mismatch`, or `Mirror sync in progress?` usually mean the client received a new `InRelease`/`repomd.xml` plus stale cached metadata. Bypass cache for package metadata and keep caching payload files:
+
+```bash
+grep -q 'map $uri $pkg_metadata' /etc/nginx/nginx.conf || sed -i '/include \\/etc\\/nginx\\/conf.d\\/\\*\\.conf;/i\
+    map $uri $pkg_metadata {\
+        default 0;\
+        ~*/(InRelease|Release|Release\\.gpg)$ 1;\
+        ~*/(Packages|Sources|Contents-[^/]+|Components-[^/]+\\.yml)(\\.gz|\\.xz|\\.bz2|\\.zst)?$ 1;\
+        ~*/repodata/(repomd\\.xml|.*\\.(xml|sqlite)(\\.gz|\\.bz2|\\.xz|\\.zck)?)$ 1;\
+        ~*/APKINDEX\\.tar\\.gz$ 1;\
+        ~*/[^/]+\\.db(\\.sig)?$ 1;\
+    }\
+' /etc/nginx/nginx.conf
+
+grep -q 'proxy_no_cache $pkg_metadata;' /etc/nginx/conf.d/package-mirrors.conf || sed -i '/proxy_cache pkg_cache;/a\
+        proxy_cache_bypass $pkg_metadata;\
+        proxy_no_cache $pkg_metadata;' /etc/nginx/conf.d/package-mirrors.conf
+
+nginx -t && systemctl reload nginx
+rm -rf /var/cache/repo-cdn/pkg/*
+```
+
+Then clean the client and retry:
+
+```bash
+apt clean
+rm -rf /var/lib/apt/lists/*
+apt update
+```
+
+9. Package files not cached for any distro (`X-Cache-Status` stays `MISS`)
 
 ```bash
 # Ensure package mirrors do NOT use slice range cache key
