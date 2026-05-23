@@ -198,7 +198,6 @@ proxy_cache_lock_timeout 20s;
 proxy_cache_revalidate on;
 proxy_cache_background_update on;
 proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
-proxy_cache_key "$scheme$proxy_host$request_uri";
 add_header X-Cache-Status $upstream_cache_status always;
 ```
 
@@ -253,6 +252,7 @@ server {
     location / {
         include /etc/nginx/snippets/proxy-common.conf;
         proxy_cache pkg_cache;
+        proxy_cache_key "$scheme$proxy_host$request_uri";
         proxy_cache_bypass $pkg_metadata;
         proxy_no_cache $pkg_metadata;
         proxy_cache_valid 200 206 301 302 45d;
@@ -849,7 +849,7 @@ Important:
 - `nginx-exporter` and `node-exporter` run with `network_mode: host`, so Prometheus must scrape them via host IP (example above uses `192.168.20.130`).
 - Replace `192.168.20.130` with your cache server IP if different.
 
-Repo CDN textfile metrics (`/opt/repo-cdn/scripts/repo-cdn-metrics.sh`):
+Repo CDN textfile metrics (`/usr/local/sbin/repo-cdn-metrics`):
 
 ```bash
 #!/usr/bin/env bash
@@ -897,7 +897,50 @@ mv "$TMP" "$OUT"
 Install it with a timer:
 
 ```bash
-install -m 0755 /opt/repo-cdn/scripts/repo-cdn-metrics.sh /usr/local/sbin/repo-cdn-metrics
+cat >/usr/local/sbin/repo-cdn-metrics <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUT_DIR=/var/lib/node_exporter/textfile_collector
+TMP="$OUT_DIR/repo_cdn.prom.$$"
+OUT="$OUT_DIR/repo_cdn.prom"
+HOSTNAME_VALUE="$(hostname -f 2>/dev/null || hostname)"
+IPV4_VALUE="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+
+mkdir -p "$OUT_DIR"
+{
+  printf '# HELP repo_cdn_host_info Cache host identity and primary IPv4 address.\n'
+  printf '# TYPE repo_cdn_host_info gauge\n'
+  printf 'repo_cdn_host_info{hostname="%s",ipv4="%s"} 1\n' "$HOSTNAME_VALUE" "$IPV4_VALUE"
+
+  printf '# HELP repo_cdn_storage_bytes Disk usage by cache area.\n'
+  printf '# TYPE repo_cdn_storage_bytes gauge\n'
+  for path in /var/cache/repo-cdn/pkg /var/cache/repo-cdn/oci /var/cache/repo-cdn/tmp; do
+    [ -d "$path" ] || continue
+    area="${path##*/}"
+    bytes="$(du -sb "$path" | awk '{print $1}')"
+    printf 'repo_cdn_storage_bytes{area="%s",path="%s"} %s\n' "$area" "$path" "$bytes"
+  done
+
+  printf '# HELP repo_cdn_registry_storage_bytes Disk usage by registry mirror.\n'
+  printf '# TYPE repo_cdn_registry_storage_bytes gauge\n'
+  for path in /var/lib/repo-cdn/registry/*; do
+    [ -d "$path" ] || continue
+    registry="${path##*/}"
+    bytes="$(du -sb "$path" | awk '{print $1}')"
+    printf 'repo_cdn_registry_storage_bytes{registry="%s",path="%s"} %s\n' "$registry" "$path" "$bytes"
+  done
+
+  printf '# HELP repo_cdn_listen_info Public listener identity.\n'
+  printf '# TYPE repo_cdn_listen_info gauge\n'
+  ss -H -ltn '( sport = :80 or sport = :443 )' | awk '{print $4}' | sort -u | while read -r listen; do
+    printf 'repo_cdn_listen_info{listen="%s"} 1\n' "$listen"
+  done
+} > "$TMP"
+mv "$TMP" "$OUT"
+EOF
+chmod 0755 /usr/local/sbin/repo-cdn-metrics
+
 cat >/etc/systemd/system/repo-cdn-metrics.service <<'EOF'
 [Unit]
 Description=Repo CDN textfile metrics
@@ -990,14 +1033,196 @@ Grafana datasources (`/opt/repo-cdn/monitoring/grafana/provisioning/datasources/
 apiVersion: 1
 datasources:
   - name: Prometheus
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090
     isDefault: true
   - name: Loki
+    uid: loki
     type: loki
     access: proxy
     url: http://loki:3100
+```
+
+Grafana dashboard provider (`/opt/repo-cdn/monitoring/grafana/provisioning/dashboards/dashboards.yml`):
+
+```yaml
+apiVersion: 1
+providers:
+  - name: cache-lite
+    orgId: 1
+    folder: Repo CDN
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+```
+
+Create the provisioning files from the documented blocks:
+
+```bash
+mkdir -p /opt/repo-cdn/monitoring/grafana/provisioning/{datasources,dashboards}
+mkdir -p /opt/repo-cdn/monitoring/grafana/dashboards
+
+cat >/opt/repo-cdn/monitoring/grafana/provisioning/datasources/datasources.yml <<'EOF'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+EOF
+
+cat >/opt/repo-cdn/monitoring/grafana/provisioning/dashboards/dashboards.yml <<'EOF'
+apiVersion: 1
+providers:
+  - name: cache-lite
+    orgId: 1
+    folder: Repo CDN
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+EOF
+```
+
+Grafana dashboard JSON (`/opt/repo-cdn/monitoring/grafana/dashboards/cache-lite-overview.json`):
+
+```json
+{
+  "uid": "cache-lite-overview",
+  "title": "cache-lite Overview",
+  "tags": ["cache-lite", "repo-cdn"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Requests / sec",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(rate(nginx_http_requests_total[1m]))"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto"}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "5xx / sec",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(rate(nginx_http_requests_total{status=~\"5..\"}[5m]))"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto"}
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Cache Host / IP",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "repo_cdn_host_info", "format": "table", "instant": true}],
+      "options": {"showHeader": true}
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Public Listeners",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "repo_cdn_listen_info", "format": "table", "instant": true}],
+      "options": {"showHeader": true}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Repo Cache Storage",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "repo_cdn_storage_bytes", "legendFormat": "{{area}}"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"]}, "tooltip": {"mode": "single", "sort": "none"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "OCI Registry Storage",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "repo_cdn_registry_storage_bytes", "legendFormat": "{{registry}}"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"]}, "tooltip": {"mode": "single", "sort": "none"}}
+    },
+    {
+      "id": 7,
+      "type": "bargauge",
+      "title": "Top Client IPs",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"refId": "A", "expr": "topk(20, sum by (ip) (count_over_time({job=\"nginx-access\"} | pattern `<ip> - <user> [<time>] host=\"<host>\" \"<method> <path> <proto>\" <status> <bytes> req_bytes=<req_bytes> <_>` [5m])))"}],
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "valueMode": "color", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 8,
+      "type": "bargauge",
+      "title": "Top Repo Hosts",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"refId": "A", "expr": "topk(20, sum by (host) (count_over_time({job=\"nginx-access\"} | pattern `<ip> - <user> [<time>] host=\"<host>\" \"<method> <path> <proto>\" <status> <bytes> req_bytes=<req_bytes> <_>` [5m])))"}],
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "valueMode": "color", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Network Throughput",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum by (device) (rate(node_network_receive_bytes_total{device!~\"lo|docker.*|br-.*|veth.*\"}[5m]))", "legendFormat": "rx {{device}}"},
+        {"refId": "B", "expr": "sum by (device) (rate(node_network_transmit_bytes_total{device!~\"lo|docker.*|br-.*|veth.*\"}[5m]))", "legendFormat": "tx {{device}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "none"}}
+    },
+    {
+      "id": 10,
+      "type": "logs",
+      "title": "Upstream Errors",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"refId": "A", "expr": "{job=\"nginx-error\"} |= \"upstream\""}],
+      "options": {"showTime": true, "showLabels": false, "wrapLogMessage": false, "sortOrder": "Descending", "dedupStrategy": "none", "enableLogDetails": true}
+    }
+  ]
+}
+```
+
+Create the dashboard file on the server:
+
+```bash
+cat >/opt/repo-cdn/monitoring/grafana/dashboards/cache-lite-overview.json <<'EOF'
+PASTE_THE_JSON_BLOCK_ABOVE_HERE
+EOF
+docker restart repo-grafana
 ```
 
 Start monitoring stack:
@@ -1110,7 +1335,6 @@ Automatic dashboard provisioning:
   - `/opt/repo-cdn/monitoring/grafana/dashboards/cache-lite-overview.json`
 - Provisioning file:
   - `/opt/repo-cdn/monitoring/grafana/provisioning/dashboards/dashboards.yml`
-
 After changing dashboard JSON:
 
 ```bash
@@ -1161,12 +1385,16 @@ docker logs --tail=80 repo-prometheus
 
 Runbook commands for common startup failures:
 
-1. Duplicate proxy directives (`proxy_buffering` / `proxy_request_buffering`)
+1. Duplicate proxy directives (`proxy_cache_key` / `proxy_buffering` / `proxy_request_buffering`)
 
 ```bash
-# Keep proxy_buffering/proxy_request_buffering only in OCI location block.
-# Remove duplicates from shared snippet:
-sed -i '/proxy_buffering /d;/proxy_request_buffering /d' /etc/nginx/snippets/proxy-common.conf
+# Keep the default cache key in package-mirrors.conf and the slice-aware key in oci-frontends.conf.
+# Do not define proxy_cache_key in the shared snippet.
+sed -i '/proxy_cache_key /d;/proxy_buffering /d;/proxy_request_buffering /d' /etc/nginx/snippets/proxy-common.conf
+
+grep -q 'proxy_cache_key "$scheme$proxy_host$request_uri";' /etc/nginx/conf.d/package-mirrors.conf || sed -i '/proxy_cache pkg_cache;/a\
+        proxy_cache_key "$scheme$proxy_host$request_uri";' /etc/nginx/conf.d/package-mirrors.conf
+
 nginx -t && systemctl reload nginx
 ```
 
@@ -1262,8 +1490,8 @@ apt update
 9. Package files not cached for any distro (`X-Cache-Status` stays `MISS`)
 
 ```bash
-# Ensure package mirrors do NOT use slice range cache key
-sed -i '/slice 1m;/d;/\\$slice_range/d' /etc/nginx/snippets/proxy-common.conf
+# Ensure package mirrors do NOT use slice range cache key and the shared snippet has no duplicate key.
+sed -i '/slice 1m;/d;/\\$slice_range/d;/proxy_cache_key /d' /etc/nginx/snippets/proxy-common.conf
 
 # Ensure package location caches metadata/content even when upstream sets cookie/cache-control headers
 grep -n 'proxy_ignore_headers Set-Cookie Cache-Control Expires;' /etc/nginx/conf.d/package-mirrors.conf
